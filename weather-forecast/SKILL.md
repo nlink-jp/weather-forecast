@@ -33,8 +33,10 @@ The output lists `candidates`, each with `office` (forecast region) and
   one; otherwise ask which they mean, listing each as
   `<office.name>・<area.name>` with a `matched_names` example, and wait.
   An `exact: true` candidate is the likeliest but does not settle it alone.
-- **None** → the place is not a Japanese place name JMA knows. Ask for the
-  nearest city or town name. A place outside Japan is out of scope: say so.
+- **None** → if the user used a popular name, resolve once more with the
+  official municipality name (伊豆大島 → 大島町, 屋久島 → 屋久島町,
+  軽井沢 → 軽井沢町). Still none → ask for the nearest city or town name.
+  A place outside Japan is out of scope: say so.
 
 ## 2. Get the forecast
 
@@ -60,16 +62,28 @@ Pick from the output what the question asks:
 | a weekday, the weekend, next week, a date 3+ days out | `weekly.rows[].days` |
 | how the weather develops, why | `overview` |
 
+A date present in `detailed` is answered from `detailed` whatever the
+wording (a weekend that falls on 明日 included); `weekly` fills the dates and
+values `detailed` lacks. Every day carries `weekday` (月…日) — use it to find
+"the weekend" or "next Tuesday"; never work out weekdays yourself. When the
+period asked runs past the last weekly date, answer the dates there are and
+say up to which date the forecast goes (「予報は15日（木）まで」).
+
 Rules for the answer:
 
 - **Open with the place and the release**: the area name and the release
   time of the part you answer from — `report_datetime` for `detailed`,
-  `weekly.report_datetime` for `weekly` — as 「◯月◯日◯時 気象庁発表」. Use
-  the `label` (今日/明日/明後日) and `date` the script gives; never
-  recompute dates.
-- **Precipitation**: `pops` are 6-hour slots still ahead (`from`–`to`,
-  `percent`). For "do I need an umbrella", answer from the highest
-  remaining percentage in the period asked.
+  `weekly.report_datetime` for `weekly`, both when they differ and you use
+  both — as 「◯月◯日◯時 気象庁発表」. Use the `label` (今日/明日/明後日),
+  `date` and `weekday` the script gives; never recompute dates. Name the
+  area of the part you answer from: `detailed[].area.name`, or the weekly
+  row's `area.name`.
+- **Precipitation**: `pops` are the 6-hour slots not yet over, the current
+  one included (`from`–`to`, `percent`). A day with no `pops` takes the
+  weekly row's daily `pop` for that date. For "do I need an umbrella",
+  take the highest of those for the period asked: 50% or more → take one;
+  30–40% → a folding umbrella is worth carrying; 20% or less → probably not
+  needed.
 - **Temperature**: `temp_min` is the morning low, `temp_max` the daytime
   high, at the named `temp_point`. A `null` in `detailed` for a date means
   the detailed forecast issues none (JMA gives no low for the current
@@ -77,22 +91,30 @@ Rules for the answer:
   (below) if it has one, otherwise leave it out — and say nothing about
   the gap.
 - **Weekly row**: use the row with `matched: true`; if none is matched and
-  there is one row, use it; otherwise name the row's own area when citing
-  it (「伊豆諸島の週間予報では…」) — never present it as the user's town.
+  there is one row, use it; otherwise use the row whose area name covers
+  the user's place (伊豆諸島北部 → 伊豆諸島) and always name that row's area
+  and its `temp_point` (「伊豆諸島の週間予報（気温は八丈島）では…」) — never
+  present its values as the user's town. The same naming applies when such
+  a row fills a gap in `detailed`.
   Show ranges as 「26℃（24〜28℃）」 when the user asks about uncertainty or
   plans around a temperature. Reliability: A = 確度が高い, B = やや高い,
-  C = やや低い; mention it for days 3+ out.
+  C = やや低い; mention it wherever the day has one.
 - **A field that is `null` is left out.** If a weekly `weather` is `null`,
   give that day's precipitation chance and temperatures without a weather
   word. Never show a code number, never explain why something is missing.
+- **Wind and waves**: give `wind` for the day; give `wave` when the
+  question touches the sea, islands, boats or the coast.
 - **Overview**: summarize only what the text says; add no causes, places or
   numbers of your own. Quote the `headline` if present.
 - **`stale: true`**: say the latest available release is from
   `report_datetime` and may be out of date, and give `source_url`.
 - **Warnings and advisories (警報・注意報) are not covered.** If asked, say
-  so and give `https://www.jma.go.jp/bosai/warning/#area_type=offices&area_code=<office.code>`.
-- **End every answer with the `attribution` line exactly as given.** JMA's
-  terms require the source and a note that the content was processed.
+  so and give `https://www.jma.go.jp/bosai/warning/#area_type=offices&area_code=<office.code>`
+  (resolve the place for the code; candidates sharing one office need no
+  question).
+- **End every answer that shows forecast content with the `attribution`
+  line exactly as given.** JMA's terms require the source and a note that
+  the content was processed.
 
 Keep it short: a few lines for a one-day question, a compact day-per-line
 list for a week. Answer in the user's language; place and weather names
