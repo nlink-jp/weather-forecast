@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -45,11 +47,15 @@ AREA = load(R17, "common/const/area.json")
 OFFICES = sorted(AREA["offices"])
 
 
-def run(*args: str) -> subprocess.CompletedProcess:
+def run(*args: str, env: dict | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, "-I", str(SCRIPT), "--base-url", R17.as_uri() + "/", *args],
-        capture_output=True, text=True,
+        capture_output=True, text=True, env=env,
     )
+
+
+def normalize_starts(candidate: dict, query: str) -> bool:
+    return any(jf.normalize(n).startswith(query) for n in candidate["matched_names"])
 
 
 class ResolveTests(unittest.TestCase):
@@ -84,15 +90,33 @@ class ResolveTests(unittest.TestCase):
     def test_contained_names_drop_out_once_a_name_starts_with_the_query(self) -> None:
         # "京都" is inside 東京都 and "大阪市" inside 東大阪市.
         self.assertNotIn("130000", [o for o, _ in self.names("京都")])
-        self.assertIn(("260000", None), self.names("京都"))
         self.assertEqual(self.names("大阪市"), [("270000", "270000")])
 
     def test_contained_names_remain_when_nothing_starts_with_the_query(self) -> None:
-        # Nothing is named 「札幌」 exactly or by prefix in class10s, but
-        # 札幌市 is a prefix match at municipality level.
-        self.assertEqual(self.names("札幌"), [("016000", "016010")])
-        # 「中部」 only ever appears inside names: all of them stay.
-        self.assertGreater(len(self.names("中部")), 1)
+        # No name starts with 「島市」; every city ending in it stays.
+        got = jf.resolve(AREA, "島市")
+        self.assertGreater(got["total"], 5)
+        self.assertFalse(any(normalize_starts(c, "島市") for c in got["candidates"]))
+
+    def test_subdivision_wins_over_its_whole_office(self) -> None:
+        # 「東京」 starts both 東京都 and 東京地方; 「京都」 both 京都府 and 京都市.
+        self.assertEqual(self.names("東京"), [("130000", "130010")])
+        self.assertEqual(self.names("京都"), [("260000", "260010")])
+        # Named exactly, the whole office stays.
+        self.assertEqual(self.names("東京都"), [("130000", None)])
+
+    def test_region_name_is_not_answered_by_a_town_alone(self) -> None:
+        # 東北町 (Aomori) starts with 「東北」 too; the six Tohoku offices come with it.
+        got = self.names("東北")
+        self.assertEqual(len(got), 7)
+        for office in ("020000", "030000", "040000", "050000", "060000", "070000"):
+            self.assertIn(office, [o for o, _ in got])
+        self.assertIn(("380000", "380020"), self.names("四国"))  # 四国中央市 (東予)
+
+    def test_small_ke_and_large_ke_are_the_same(self) -> None:
+        for query in ("龍ヶ崎市", "龍ケ崎市", "茅ケ崎", "茅ヶ崎", "関ヶ原"):
+            with self.subTest(query=query):
+                self.assertEqual(jf.resolve(AREA, query)["total"], 1)
 
     def test_center_name_offers_its_regions(self) -> None:
         got = self.names("北海道")
@@ -237,10 +261,20 @@ class DateTests(unittest.TestCase):
         self.assertEqual(len(days), 5)
 
     def test_now_in_another_offset_is_read_as_jst(self) -> None:
-        # 2026-10-08T15:30Z is 00:30 JST on the 9th.
-        now = dt.datetime(2026, 10, 8, 15, 30, tzinfo=dt.timezone.utc).astimezone(JST)
+        # 2026-10-08T15:30Z is 00:30 JST on the 9th — passed in UTC as it is.
+        now = dt.datetime(2026, 10, 8, 15, 30, tzinfo=dt.timezone.utc)
         out = jf.forecast(fetcher(), "130000", "130010", now)
         self.assertEqual(out["detailed"][0]["days"][0]["date"], "2026-10-09")
+
+    def test_cli_now_offsets(self) -> None:
+        # Run in a UTC host zone: a time without an offset must still be JST.
+        env = {**os.environ, "TZ": "UTC"}
+        for now in ("2026-10-08T15:30+00:00", "2026-10-09T00:30"):  # the latter has no offset
+            with self.subTest(now=now):
+                proc = run("--now", now, "forecast", "--office", "130000", "--area", "130010", env=env)
+                out = json.loads(proc.stdout)
+                self.assertEqual(out["now"], "2026-10-09T00:30+09:00")
+                self.assertEqual(out["detailed"][0]["days"][0]["date"], "2026-10-09")
 
 
 class PopSlotTests(unittest.TestCase):
@@ -283,21 +317,25 @@ class FreshnessTests(unittest.TestCase):
 class TemperatureSlotTests(unittest.TestCase):
     """The four documented slots (府県天気予報 解説資料 ※2)."""
 
-    def test_slots(self) -> None:
-        release = dt.date(2026, 10, 9)
-        cases = {
-            "2026-10-09T09:00": "temp_max",  # 今日日中: 日中の最高気温
-            "2026-10-09T00:00": None,        # 今日 (24 h): 最高気温, not a low
-            "2026-10-10T00:00": "temp_min",  # 明日朝: 朝の最低気温
-            "2026-10-10T09:00": "temp_max",  # 明日日中
-        }
-        for t, want in cases.items():
-            with self.subTest(t=t):
-                self.assertEqual(jf.temp_slot(at(t), release), want)
+    def test_four_slots(self) -> None:
+        times = [at("2026-10-09T00:00"), at("2026-10-09T09:00"),
+                 at("2026-10-10T00:00"), at("2026-10-10T09:00")]
+        self.assertEqual(jf.temp_slots(times), [
+            None,        # 今日 (24 h): 最高気温, not a low
+            "temp_max",  # 今日日中: 日中の最高気温
+            "temp_min",  # 明日朝: 朝の最低気温
+            "temp_max",  # 明日日中
+        ])
 
-    def test_evening_release_reads_tomorrow_morning_as_low(self) -> None:
-        # A release at 17:00 or later (20:00 observed) on the 8th covers the 9th.
-        self.assertEqual(jf.temp_slot(at("2026-10-09T00:00"), dt.date(2026, 10, 8)), "temp_min")
+    def test_four_slots_in_any_order(self) -> None:
+        times = [at("2026-10-09T09:00"), at("2026-10-09T00:00"),
+                 at("2026-10-10T00:00"), at("2026-10-10T09:00")]
+        self.assertEqual(jf.temp_slots(times), ["temp_max", None, "temp_min", "temp_max"])
+
+    def test_two_slots(self) -> None:
+        # 17:00 and 20:00 releases, and a correction issued after midnight.
+        times = [at("2026-10-09T00:00"), at("2026-10-09T09:00")]
+        self.assertEqual(jf.temp_slots(times), ["temp_min", "temp_max"])
 
 
 class TemperatureTests(unittest.TestCase):
@@ -309,10 +347,17 @@ class TemperatureTests(unittest.TestCase):
         self.assertEqual((days["2026-10-08"]["temp_min"], days["2026-10-08"]["temp_max"]), (None, None))
 
     def test_first_present_point_wins(self) -> None:
-        # forecast_area.json lists 63576 for 兵庫県南部 although today's data
-        # carries no such point; the next listed one must be used.
-        out = jf.forecast(fetcher(), "280000", "280010", at("2026-10-09T03:30"))
-        self.assertIsNotNone(out["detailed"][0]["temp_point"])
+        # forecast_area.json lists 73136 first for 愛媛県東予 although today's
+        # data carries no such point; the next listed one (新居浜) is used.
+        fa = load(R17, "forecast/const/forecast_area.json")
+        listed = next(e["amedas"] for e in fa["380000"] if e["class10"] == "380020")
+        self.assertEqual(listed[0], "73136")
+        out = jf.forecast(fetcher(), "380000", "380020", at("2026-10-09T03:30"))
+        self.assertEqual(out["detailed"][0]["temp_point"], "新居浜")
+
+    def test_landlocked_prefecture_has_no_waves(self) -> None:
+        out = jf.forecast(fetcher(), "090000", None, at("2026-10-09T03:30"))  # 栃木県
+        self.assertTrue(all(d["wave"] is None for a in out["detailed"] for d in a["days"]))
 
 
 class TextTests(unittest.TestCase):
@@ -370,6 +415,41 @@ class CliTests(unittest.TestCase):
                 proc = run(*args)
                 self.assertEqual(proc.returncode, 2)
                 self.assertEqual(json.loads(proc.stdout)["error"], error)
+
+    def broken_copy(self, tmp: str, path: str, content: bytes) -> str:
+        root = Path(tmp) / "bosai"
+        shutil.copytree(R17, root)
+        (root / path).write_bytes(content)
+        return root.as_uri() + "/"
+
+    def test_malformed_data_is_bad_response_not_a_traceback(self) -> None:
+        cases = {
+            "forecast/data/forecast/130000.json": b"[]",
+            "forecast/data/overview_forecast/130000.json": "概況".encode("shift_jis"),
+        }
+        for path, content in cases.items():
+            with self.subTest(path=path), tempfile.TemporaryDirectory() as tmp:
+                base = self.broken_copy(tmp, path, content)
+                proc = subprocess.run(
+                    [sys.executable, "-I", str(SCRIPT), "--base-url", base,
+                     "forecast", "--office", "130000"],
+                    capture_output=True, text=True,
+                )
+                self.assertEqual(proc.returncode, 2, proc.stderr)
+                self.assertEqual(json.loads(proc.stdout)["error"], "bad_response")
+                self.assertNotIn("Traceback", proc.stderr)
+
+    def test_weekly_rows_that_do_not_pair_up_fail(self) -> None:
+        data = load(R17, "forecast/data/forecast/130000.json")
+        data[1]["timeSeries"][1]["areas"].pop()
+        with self.assertRaises(jf.ForecastError) as cm:
+            jf.build_weekly(data[1], [], None, at("2026-10-09T03:30"))
+        self.assertEqual(cm.exception.error, "bad_response")
+
+    def test_unparsable_now_is_json_too(self) -> None:
+        proc = run("--now", "tomorrow", "resolve", "札幌")
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("error", json.loads(proc.stdout))
 
     def test_unreachable_source_is_fetch_failed(self) -> None:
         with tempfile.TemporaryDirectory() as empty:

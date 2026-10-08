@@ -78,7 +78,7 @@ def http_fetcher(base_url: str) -> Fetch:
             raise ForecastError("fetch_failed", f"{url}: HTTP {e.code}") from e
         except (urllib.error.URLError, TimeoutError, OSError) as e:
             raise ForecastError("fetch_failed", f"{url}: {e}") from e
-        except json.JSONDecodeError as e:
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
             raise ForecastError("bad_response", f"{url}: not JSON") from e
 
     return fetch
@@ -89,7 +89,9 @@ def http_fetcher(base_url: str) -> Fetch:
 
 
 def parse_time(s: str) -> dt.datetime:
-    return dt.datetime.fromisoformat(s).astimezone(JST)
+    t = dt.datetime.fromisoformat(s)
+    # A time without an offset is Japan time, never the host's zone.
+    return t.replace(tzinfo=JST) if t.tzinfo is None else t.astimezone(JST)
 
 
 def blank_to_none(v: Any) -> Any:
@@ -122,7 +124,12 @@ def relative_label(day: dt.date, today: dt.date) -> str | None:
 
 
 def normalize(s: str) -> str:
-    return unicodedata.normalize("NFKC", s).strip()
+    # NFKC leaves the small ヶ/ヵ alone, yet place names are written both ways
+    # (area.json: 龍ケ崎市 but 茅ヶ崎市); fold them onto ケ/カ.
+    return unicodedata.normalize("NFKC", s).strip().translate(SMALL_KANA)
+
+
+SMALL_KANA = str.maketrans({"ヶ": "ケ", "ヵ": "カ"})
 
 
 # --------------------------------------------------------------------------
@@ -180,17 +187,22 @@ def resolve(area: dict, query: str, limit: int = 20) -> dict:
                 "matched_names": [name],
             }
 
-    if not seen:
-        # A region name such as "北海道" or "関東甲信" names a center, not a
-        # forecast region: offer the forecast regions under it.
-        for code, entry in area["centers"].items():
-            if q in normalize(entry["name"]):
-                for office in entry["children"]:
-                    seen[(office, None)] = {
-                        "office": {"code": office, "name": area["offices"][office]["name"]},
-                        "area": None,
-                        "matched_names": [entry["name"]],
-                    }
+    # A region name such as "東北" or "関東甲信" names a center, not a
+    # forecast region: offer the forecast regions under it. Ranked with the
+    # rest, so 東北町 alone does not answer for 東北地方.
+    for entry in area["centers"].values():
+        if q not in normalize(entry["name"]):
+            continue
+        for office in entry["children"]:
+            key = office_and_class10(area, "offices", office)
+            c = seen.setdefault(key, {
+                "office": {"code": office, "name": area["offices"][office]["name"]},
+                "area": None if key[1] is None
+                else {"code": key[1], "name": area["class10s"][key[1]]["name"]},
+                "matched_names": [],
+            })
+            c["matched_names"].append(entry["name"])
+            c["via_center"] = True
 
     candidates = list(seen.values())
     for c in candidates:
@@ -201,10 +213,20 @@ def resolve(area: dict, query: str, limit: int = 20) -> dict:
     # 東大阪市) is noise once some name starts with it.
     if any(c["rank"] < 2 for c in candidates):
         candidates = [c for c in candidates if c["rank"] < 2]
+    # "東京" starts both 東京都 (the whole office) and 東京地方: the
+    # subdivision is the answer. The whole office stays only when it is named
+    # exactly (「東京都」) or offered for a region name.
+    with_area = {c["office"]["code"] for c in candidates if c["area"] is not None}
+    candidates = [
+        c for c in candidates
+        if c["area"] is not None or c["exact"] or c.get("via_center")
+        or c["office"]["code"] not in with_area
+    ]
     # Exact, then prefix; ties keep area.json order (stable sort).
     candidates.sort(key=lambda c: c["rank"])
     for c in candidates:
         del c["rank"]
+        c.pop("via_center", None)
     return {
         "query": query,
         "total": len(candidates),
@@ -220,27 +242,35 @@ def first_present(candidates: list[str], present: set[str]) -> str | None:
     return next((c for c in candidates if c in present), None)
 
 
-def temp_slot(t: dt.datetime, release_day: dt.date) -> str | None:
-    """Which temperature a detailed-forecast time stands for.
+def temp_slots(times: list[dt.datetime]) -> list[str | None]:
+    """Which temperature each detailed-forecast time stands for.
 
     JMA's prefectural forecast defines up to four slots (解説資料, 府県天気予報
     ※2): 今日日中 = today 09:00 (日中の最高気温), 今日 = today 00:00 for 24 h
     (最高気温), 明日朝 = tomorrow 00:00 (朝の最低気温), 明日日中 = tomorrow
-    09:00. There is no "this morning's low": a 00:00 on the release day is a
-    maximum and must not be read as the minimum.
+    09:00 — four slots, or only the last two. There is no "this morning's
+    low": when two 00:00 slots are present the earlier one is 今日, a
+    maximum, and must not be read as the minimum. Deciding by the slots
+    present rather than by the release date keeps a correction issued
+    after midnight readable.
     """
-    if t.hour == 9:
-        return "temp_max"
-    if t.hour == 0 and t.date() > release_day:
-        return "temp_min"
-    return None
+    midnights = [t for t in times if t.hour == 0]
+    last_midnight = max(midnights) if midnights else None
+    keys = []
+    for t in times:
+        if t.hour == 9:
+            keys.append("temp_max")
+        elif t.hour == 0 and t == last_midnight:
+            keys.append("temp_min")
+        else:
+            keys.append(None)
+    return keys
 
 
 def build_detailed(report: dict, office_area_codes: list[str], temp_points: dict[str, list[str]],
                    now: dt.datetime) -> list[dict]:
     """Today..day after tomorrow, one entry per primary subdivision."""
     today = now.date()
-    release_day = parse_time(report["reportDatetime"]).date()
     weather_ts, pop_ts, temp_ts = report["timeSeries"][:3]
 
     weather_days = [parse_time(t).date() for t in weather_ts["timeDefines"]]
@@ -286,8 +316,7 @@ def build_detailed(report: dict, office_area_codes: list[str], temp_points: dict
         point = first_present(temp_points.get(code, []), set(temps_by_point))
         if point is not None:
             temps = temps_by_point[point]["temps"]
-            for i, t in enumerate(temp_times):
-                key = temp_slot(t, release_day)
+            for i, (t, key) in enumerate(zip(temp_times, temp_slots(temp_times))):
                 if key and t.date() in days:
                     days[t.date()][key] = to_int(temps[i])
 
@@ -306,6 +335,11 @@ def build_weekly(report: dict, office_week_codes: list[str], matched_code: str |
     wx_ts, temp_ts = report["timeSeries"][:2]
     dates = [parse_time(t).date() for t in wx_ts["timeDefines"]]
 
+    # Temperature rows follow the weather rows in the same order (observed on
+    # all 63 rows). A count mismatch means that no longer holds: fail rather
+    # than put one place's temperatures under another's name.
+    if len(wx_ts["areas"]) != len(temp_ts["areas"]):
+        raise ForecastError("bad_response", "weekly weather and temperature rows differ in number")
     pairs = list(zip(wx_ts["areas"], temp_ts["areas"]))
     rows = [p for p in pairs if p[0]["area"]["code"] in office_week_codes] or pairs
 
@@ -342,6 +376,7 @@ def range_or_none(lower: Any, upper: Any) -> list[int] | None:
 
 
 def forecast(fetch: Fetch, office: str, area_code: str | None, now: dt.datetime) -> dict:
+    now = now.astimezone(JST)
     area = fetch("common/const/area.json")
     if office not in area["offices"]:
         raise ForecastError("unknown_office", f"no forecast region {office}")
@@ -408,15 +443,21 @@ def main(argv: list[str] | None = None) -> int:
     f.add_argument("--area", help="primary subdivision code (from resolve)")
     args = ap.parse_args(argv)
 
-    now = parse_time(args.now) if args.now else dt.datetime.now(JST)
     fetch = http_fetcher(args.base_url)
     try:
+        now = parse_time(args.now) if args.now else dt.datetime.now(JST)
         if args.cmd == "resolve":
             result = resolve(fetch("common/const/area.json"), args.name)
         else:
             result = forecast(fetch, args.office, args.area, now)
     except ForecastError as e:
         print(json.dumps({"error": e.error, "message": e.message}, ensure_ascii=False))
+        return 2
+    except Exception as e:  # noqa: BLE001 — JMA data in an unexpected shape
+        # Every failure leaves as JSON with exit 2, never as a traceback the
+        # model might try to explain or work around.
+        print(json.dumps({"error": "bad_response", "message": f"{type(e).__name__}: {e}"},
+                         ensure_ascii=False))
         return 2
     print(json.dumps(result, ensure_ascii=False, indent=1))
     return 0
