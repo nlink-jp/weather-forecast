@@ -46,6 +46,7 @@ SHARED_FILE = {
 STALE_AFTER = dt.timedelta(hours=15)
 
 RELATIVE_LABELS = {0: "今日", 1: "明日", 2: "明後日"}
+WEEKDAYS = "月火水木金土日"  # date.weekday(): Monday is 0
 
 Fetch = Callable[[str], Any]
 
@@ -259,6 +260,7 @@ def build_detailed(report: dict, office_area_codes: list[str], temp_points: dict
                 continue
             days[day] = {
                 "date": day.isoformat(),
+                "weekday": WEEKDAYS[day.weekday()],
                 "label": relative_label(day, today),
                 "weather": tidy(a["weathers"][i]) if "weathers" in a else None,
                 "wind": tidy(a["winds"][i]) if "winds" in a else None,
@@ -315,6 +317,7 @@ def build_weekly(report: dict, office_week_codes: list[str], matched_code: str |
                 continue
             days.append({
                 "date": day.isoformat(),
+                "weekday": WEEKDAYS[day.weekday()],
                 "label": relative_label(day, today),
                 "weather": telop_name(blank_to_none(wx["weatherCodes"][i])),
                 "pop": to_int(wx["pops"][i]),

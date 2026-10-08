@@ -224,10 +224,16 @@ class DateTests(unittest.TestCase):
         self.assertEqual(self.days("2026-10-08T23:59")[0], ("2026-10-08", "今日"))
         self.assertEqual(self.days("2026-10-09T00:00")[0], ("2026-10-09", "今日"))
 
+    def test_weekday_is_given_for_every_day(self) -> None:
+        out = jf.forecast(fetcher(), "130000", "130010", at("2026-10-09T03:30"))
+        self.assertEqual(out["detailed"][0]["days"][0]["weekday"], "金")  # 2026-10-09
+        weekly = out["weekly"]["rows"][0]["days"]
+        self.assertEqual([d["weekday"] for d in weekly], list("金土日月火水木"))
+
     def test_weekly_drops_past_days_too(self) -> None:
         out = jf.forecast(fetcher(), "130000", None, at("2026-10-11T12:00"))
         days = out["weekly"]["rows"][0]["days"]
-        self.assertEqual(days[0], {**days[0], "date": "2026-10-11", "label": "今日"})
+        self.assertEqual((days[0]["date"], days[0]["label"], days[0]["weekday"]), ("2026-10-11", "今日", "日"))
         self.assertEqual(len(days), 5)
 
     def test_now_in_another_offset_is_read_as_jst(self) -> None:
