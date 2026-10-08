@@ -10,7 +10,8 @@ forecast region it checks that
 - the forecast still has the two-report shape the script reads;
 - the release is fresh (not older than the script's stale threshold);
 - every telop number in the data has a name in the bundled table;
-- every primary subdivision still finds a temperature point.
+- every primary subdivision still finds a temperature point;
+- weekly weather and temperature rows still pair up in order.
 
 Maintenance only: online (about 120 requests, paced), never part of
 ``make check``, never shipped. Exit 1 on any finding.
@@ -42,11 +43,17 @@ def status(url: str) -> int:
         return e.code
 
 
+def office_week(row: dict, week_area: dict, office: str) -> bool:
+    """Whether a weekly row belongs to the office (shared files hold two)."""
+    return row["area"]["code"] in {e["week"] for e in week_area.get(office, [])}
+
+
 def main() -> int:
     fetch = jf.http_fetcher(jf.BASE_URL)
     now = dt.datetime.now(jf.JST)
     area = fetch("common/const/area.json")
     forecast_area = fetch("forecast/const/forecast_area.json")
+    week_area = fetch("forecast/const/week_area.json")
     findings: list[str] = []
 
     for office in sorted(area["offices"]):
@@ -68,6 +75,14 @@ def main() -> int:
         published = jf.parse_time(data[0]["reportDatetime"])
         if now - published > jf.STALE_AFTER:
             findings.append(f"{office}: release {data[0]['reportDatetime']} is stale")
+
+        wx_rows, temp_rows = (data[1]["timeSeries"][i]["areas"] for i in (0, 1))
+        week_pairs = {(e["week"], e["amedas"]) for e in week_area.get(office, [])}
+        for wx, temp in zip(wx_rows, temp_rows):
+            if office_week(wx, week_area, office) and (wx["area"]["code"], temp["area"]["code"]) not in week_pairs:
+                findings.append(f"{office}: weekly row {wx['area']['code']} pairs with {temp['area']['code']}, not in week_area.json")
+        if len(wx_rows) != len(temp_rows):
+            findings.append(f"{office}: weekly weather/temperature row counts differ")
 
         detailed = {a["area"]["code"] for a in data[0]["timeSeries"][0]["areas"]}
         missing = set(area["offices"][office]["children"]) - detailed
