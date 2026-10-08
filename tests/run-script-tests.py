@@ -81,6 +81,19 @@ class ResolveTests(unittest.TestCase):
                 self.assertTrue(first["exact"])
                 self.assertEqual(first["office"]["code"], office)
 
+    def test_contained_names_drop_out_once_a_name_starts_with_the_query(self) -> None:
+        # "京都" is inside 東京都 and "大阪市" inside 東大阪市.
+        self.assertNotIn("130000", [o for o, _ in self.names("京都")])
+        self.assertIn(("260000", None), self.names("京都"))
+        self.assertEqual(self.names("大阪市"), [("270000", "270000")])
+
+    def test_contained_names_remain_when_nothing_starts_with_the_query(self) -> None:
+        # Nothing is named 「札幌」 exactly or by prefix in class10s, but
+        # 札幌市 is a prefix match at municipality level.
+        self.assertEqual(self.names("札幌"), [("016000", "016010")])
+        # 「中部」 only ever appears inside names: all of them stay.
+        self.assertGreater(len(self.names("中部")), 1)
+
     def test_center_name_offers_its_regions(self) -> None:
         got = self.names("北海道")
         self.assertEqual(len(got), 8)
@@ -261,6 +274,26 @@ class FreshnessTests(unittest.TestCase):
         self.assertTrue(self.stale("2026-10-09T08:01"))
 
 
+class TemperatureSlotTests(unittest.TestCase):
+    """The four documented slots (府県天気予報 解説資料 ※2)."""
+
+    def test_slots(self) -> None:
+        release = dt.date(2026, 10, 9)
+        cases = {
+            "2026-10-09T09:00": "temp_max",  # 今日日中: 日中の最高気温
+            "2026-10-09T00:00": None,        # 今日 (24 h): 最高気温, not a low
+            "2026-10-10T00:00": "temp_min",  # 明日朝: 朝の最低気温
+            "2026-10-10T09:00": "temp_max",  # 明日日中
+        }
+        for t, want in cases.items():
+            with self.subTest(t=t):
+                self.assertEqual(jf.temp_slot(at(t), release), want)
+
+    def test_evening_release_reads_tomorrow_morning_as_low(self) -> None:
+        # A release at 17:00 or later (20:00 observed) on the 8th covers the 9th.
+        self.assertEqual(jf.temp_slot(at("2026-10-09T00:00"), dt.date(2026, 10, 8)), "temp_min")
+
+
 class TemperatureTests(unittest.TestCase):
     def test_17_release_gives_tomorrow_min_and_max(self) -> None:
         # Official page (17:00 release of 10/8): 東京 明日 朝の最低 15, 日中の最高 26.
@@ -284,7 +317,18 @@ class TextTests(unittest.TestCase):
     def test_unknown_telop_has_no_name(self) -> None:
         self.assertIsNone(jf.telop_name("199"))
         self.assertIsNone(jf.telop_name(None))
-        self.assertEqual(jf.telop_name("101"), "晴時々曇")
+
+    def test_documented_name_wins_over_the_page(self) -> None:
+        # Documented table: 晴れ時々くもり; forecast page: 晴時々曇.
+        self.assertEqual(jf.telop_name("101"), "晴れ時々くもり")
+
+    def test_page_names_numbers_the_document_no_longer_lists(self) -> None:
+        self.assertEqual(jf.telop_name("108"), "晴一時雨か雷雨")
+
+    def test_every_documented_number_is_also_on_the_page(self) -> None:
+        tables = json.loads((SCRIPTS / "telops.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(tables["official"]["telops"]), 66)
+        self.assertLessEqual(set(tables["official"]["telops"]), set(tables["page"]["telops"]))
 
     def test_answer_fields_carry_no_telop_number(self) -> None:
         out = jf.forecast(fetcher(), "130000", None, at("2026-10-09T03:30"))

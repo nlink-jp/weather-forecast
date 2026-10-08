@@ -29,7 +29,10 @@ from typing import Any, Callable
 JST = dt.timezone(dt.timedelta(hours=9), "JST")
 BASE_URL = "https://www.jma.go.jp/bosai/"
 PAGE_URL = "https://www.jma.go.jp/bosai/forecast/#area_type=offices&area_code={office}"
-TELOPS = json.loads((Path(__file__).with_name("telops.json")).read_text(encoding="utf-8"))["telops"]
+_TELOP_TABLES = json.loads((Path(__file__).with_name("telops.json")).read_text(encoding="utf-8"))
+# The documented table wins; the forecast page's table names the numbers the
+# documented one no longer lists (ADR-0001 §5).
+TELOPS = {**_TELOP_TABLES["page"]["telops"], **_TELOP_TABLES["official"]["telops"]}
 
 # Two forecast regions have no file of their own: their forecast and overview
 # are published inside a neighbour's file (observed 2026-10-09: the own URL
@@ -146,6 +149,12 @@ def office_and_class10(area: dict, level: str, code: str) -> tuple[str, str | No
     return area["class10s"][code]["parent"], code
 
 
+def match_rank(q: str, name: str) -> int:
+    """0 exact, 1 prefix, 2 contained."""
+    n = normalize(name)
+    return 0 if n == q else 1 if n.startswith(q) else 2
+
+
 def resolve(area: dict, query: str, limit: int = 20) -> dict:
     q = normalize(query)
     if not q:
@@ -184,10 +193,17 @@ def resolve(area: dict, query: str, limit: int = 20) -> dict:
 
     candidates = list(seen.values())
     for c in candidates:
-        c["exact"] = any(normalize(n) == q for n in c["matched_names"])
+        c["rank"] = min(match_rank(q, n) for n in c["matched_names"])
+        c["exact"] = c["rank"] == 0
         c["matched_names"] = sorted(set(c["matched_names"]))[:5]
-    # Exact name matches first; otherwise keep area.json order (stable sort).
-    candidates.sort(key=lambda c: not c["exact"])
+    # A name that merely contains the query ("京都" in 東京都, "大阪市" in
+    # 東大阪市) is noise once some name starts with it.
+    if any(c["rank"] < 2 for c in candidates):
+        candidates = [c for c in candidates if c["rank"] < 2]
+    # Exact, then prefix; ties keep area.json order (stable sort).
+    candidates.sort(key=lambda c: c["rank"])
+    for c in candidates:
+        del c["rank"]
     return {
         "query": query,
         "total": len(candidates),
@@ -203,10 +219,27 @@ def first_present(candidates: list[str], present: set[str]) -> str | None:
     return next((c for c in candidates if c in present), None)
 
 
+def temp_slot(t: dt.datetime, release_day: dt.date) -> str | None:
+    """Which temperature a detailed-forecast time stands for.
+
+    JMA's prefectural forecast defines up to four slots (解説資料, 府県天気予報
+    ※2): 今日日中 = today 09:00 (日中の最高気温), 今日 = today 00:00 for 24 h
+    (最高気温), 明日朝 = tomorrow 00:00 (朝の最低気温), 明日日中 = tomorrow
+    09:00. There is no "this morning's low": a 00:00 on the release day is a
+    maximum and must not be read as the minimum.
+    """
+    if t.hour == 9:
+        return "temp_max"
+    if t.hour == 0 and t.date() > release_day:
+        return "temp_min"
+    return None
+
+
 def build_detailed(report: dict, office_area_codes: list[str], temp_points: dict[str, list[str]],
                    now: dt.datetime) -> list[dict]:
     """Today..day after tomorrow, one entry per primary subdivision."""
     today = now.date()
+    release_day = parse_time(report["reportDatetime"]).date()
     weather_ts, pop_ts, temp_ts = report["timeSeries"][:3]
 
     weather_days = [parse_time(t).date() for t in weather_ts["timeDefines"]]
@@ -252,11 +285,8 @@ def build_detailed(report: dict, office_area_codes: list[str], temp_points: dict
         if point is not None:
             temps = temps_by_point[point]["temps"]
             for i, t in enumerate(temp_times):
-                if t.date() not in days:
-                    continue
-                # 00:00 marks the morning minimum, 09:00 the daytime maximum.
-                key = "temp_min" if t.hour == 0 else "temp_max" if t.hour == 9 else None
-                if key:
+                key = temp_slot(t, release_day)
+                if key and t.date() in days:
                     days[t.date()][key] = to_int(temps[i])
 
         out.append({
