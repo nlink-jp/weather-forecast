@@ -31,8 +31,10 @@ The output lists `candidates`, each with `office` (forecast region) and
 - **One candidate** → use it.
 - **Several** → if the user's words settle it (「東京都の府中」), take that
   one; otherwise ask which they mean, listing each as
-  `<office.name>・<area.name>` with a `matched_names` example, and wait.
-  An `exact: true` candidate is the likeliest but does not settle it alone.
+  `<office.name>・<area.name>` (or `<office.name>（全域）` when `area` is
+  `null`) with one `matched_names` example, and wait. A region name such as
+  東北 or 九州 returns its prefectures: ask which one. An `exact: true`
+  candidate is the likeliest but does not settle it alone.
 - **None** → if the user used a popular name, resolve once more with the
   official municipality name (伊豆大島 → 大島町, 屋久島 → 屋久島町,
   軽井沢 → 軽井沢町). Still none → ask for the nearest city or town name.
@@ -47,10 +49,11 @@ python3 SKILL_DIR/scripts/jma_forecast.py forecast --office <office.code> [--are
 Pass `--area` whenever the candidate has one. Exit status 2 prints
 `{"error": ..., "message": ...}`:
 
-- `fetch_failed` / `bad_response` → JMA could not be reached. Tell the user
-  the forecast could not be retrieved right now and to try again; do not
-  substitute anything.
+- `fetch_failed` / `bad_response` → the forecast could not be retrieved
+  or read. Tell the user it could not be retrieved right now and to try
+  again; do not substitute anything, and do not show the message.
 - `unknown_office` / `unknown_area` → go back to step 1.
+- `bad_query` (from `resolve`) → ask the user for the place name.
 
 ## 3. Answer
 
@@ -78,14 +81,16 @@ Rules for the answer:
   `date` and `weekday` the script gives; never recompute dates. Name the
   area of the part you answer from: `detailed[].area.name`, or the weekly
   row's `area.name`.
-- **Precipitation**: `pops` are the 6-hour slots not yet over, the current
-  one included (`from`–`to`, `percent`). A day with no `pops` takes the
+- **Precipitation**: `pops` are the remaining 6-hour slots of the release
+  (`from`–`to`, `percent`). A day with no `pops` takes the
   weekly row's daily `pop` for that date. For "do I need an umbrella",
   take the highest of those for the period asked: 50% or more → take one;
   30–40% → a folding umbrella is worth carrying; 20% or less → probably not
   needed.
 - **Temperature**: `temp_min` is the morning low, `temp_max` the daytime
-  high, at the named `temp_point`. A `null` in `detailed` for a date means
+  high. Always name the point they are for (「最高24℃（札幌）」): the
+  detailed `temp_point`, or the weekly row's `temp_point` for values taken
+  from `weekly` — the two can differ (十勝: 帯広 / 釧路). A `null` in `detailed` for a date means
   the detailed forecast issues none (JMA gives no low for the current
   morning, for example): take that date's value from the weekly row
   (below) if it has one, otherwise leave it out — and say nothing about

@@ -82,10 +82,17 @@ weather-forecast/
 - **Dates are relabelled against the current JST time**; past days and
   ended 6-hour slots are dropped (`end <= now`). JMA's own page keeps
   labelling by release time — the script deliberately differs.
-- **Detailed temperatures follow the documented slots** (`temp_slot`):
-  09:00 is the daytime high; 00:00 is the morning low only on a day after the
-  release day. A 00:00 on the release day (05:00/11:00 releases) is today's
-  24-hour maximum — reading it as a low is the trap.
+- **Detailed temperatures follow the documented slots** (`temp_slots`):
+  09:00 is the daytime high; with two 00:00 slots only the later one is the
+  morning low — the earlier (05:00/11:00 releases) is today's 24-hour
+  maximum, and reading it as a low is the trap. Decided by the slots
+  present, not the release date.
+- **resolve ranking**: exact > prefix > contained (contained-only names drop
+  out once a prefix exists); a whole office yields to its own subdivision
+  unless named exactly; region names (`centers`) rank with the rest; ヶ/ヵ
+  fold onto ケ/カ.
+- **Every failure is JSON with exit 2** — `main` catches everything; a
+  traceback reaching the model is a bug.
 - **Release times vary** (20:00 releases occur; detailed, weekly and overview
   carry separate times). Freshness is judged on the detailed release only.
 - **Any failed fetch fails the whole call** — never return a partial result

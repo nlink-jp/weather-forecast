@@ -78,9 +78,8 @@ From the 2026-08-26 document set: 府県天気予報，地域時系列予報（�
 7. **Weekly rows are per office.** The official `week_area.json` is a
    **candidate list** per subdivision; only candidates present in the
    current data count. 64 of 142 subdivisions hit one. Of the 78 that do
-   not, 72 sit in offices with a single weekly row and are trivial; only six
-   cannot be decided (伊豆諸島北部, 下北, 沿岸南部, 浜通り, 大隅,
-   種子島・屋久島). The official page does not map subdivisions either: it
+   not, 74 sit in offices with a single weekly row and are trivial; only four
+   cannot be decided (伊豆諸島北部, 下北, 沿岸南部, 浜通り). The official page does not map subdivisions either: it
    lists all of the office's rows with their area names.
 8. **Weekly temperature rows are in the same order as the weather rows**
    (all 63 rows, consistent with the pairs in `week_area.json`).
@@ -114,9 +113,14 @@ One script, `scripts/jma_forecast.py`, with two subcommands.
   and returns each candidate as an (office, primary subdivision) pair.
   Candidates rank exact over prefix over contained; once any name matches
   exactly or by prefix, contained-only candidates are dropped (「京都」 does
-  not offer 東京都). Several candidates are all returned and the model
-  chooses (by asking the user). An office with a single subdivision is that
-  subdivision.
+  not offer 東京都). When a whole office and one of its subdivisions both
+  remain, the whole office stays only if named exactly (「東京」 gives
+  東京地方, 「東京都」 the whole office). Region names (`centers`: 東北,
+  九州) take part in the same ranking and offer their offices, so 東北町
+  alone does not answer for 東北. Names compare after NFKC with ヶ/ヵ folded
+  onto ケ/カ (area.json itself mixes 龍ケ崎市 and 茅ヶ崎市). Several
+  candidates are all returned and the model chooses (by asking the user).
+  An office with a single subdivision is that subdivision.
 - `forecast --office <code> [--area <code>]` — area codes repeat across
   levels (`014030` is both an office and a subdivision), so the two arrive
   as separate arguments. Either one not present in `area.json` is refused
@@ -126,7 +130,10 @@ At run time it fetches five JMA files: `area.json`, `forecast_area.json`,
 `week_area.json`, the forecast and the overview. Nothing is cached. **If
 any one of them fails, the whole call fails** (`fetch_failed`, exit 2): a
 partial result would let the model read a missing section as "there is no
-such information".
+such information". Data in an unexpected shape (not JSON, an empty array,
+weekly weather and temperature rows differing in number) is
+`bad_response`; every failure leaves as JSON, never as a traceback. A time
+without an offset is read as Japan time.
 
 ### 3. Dates are relabelled against the current JST time
 
@@ -136,9 +143,12 @@ or before now) are dropped. `--now` overrides the clock for tests.
 
 ### 4. Temperatures are read by the documented slots
 
-A 09:00 value is the daytime maximum; a 00:00 value **on a day after the
-release day** is the morning minimum. A 00:00 value on the release day
-(今日, the 24-hour maximum) is not read as a minimum. The point used is the
+A 09:00 value is the daytime maximum. Of the 00:00 values, **when there are
+two only the later one** is the morning minimum; the earlier one (今日, the
+24-hour maximum) is not read as a minimum. A single 00:00 slot (17:00 and
+20:00 releases) is the morning minimum. Deciding by the slots present rather
+than by the release date keeps a correction issued after midnight
+readable. The point used is the
 first of `forecast_area.json`'s candidates present in the current data.
 
 ### 5. The weekly forecast lists every row of the office by name
@@ -225,7 +235,10 @@ given: 「出典：気象庁ホームページ（URL）を加工して作成」.
   release steps).
 - Accepted residual risk: no response-size cap (the source is JMA; the
   timeout is 20 s). The overview's free text is passed to the model as the
-  observatory wrote it.
+  observatory wrote it. SKILL.md's `allowed-tools: Bash(python3 *)` also
+  admits python3 runs other than the bundled script; it cannot be narrowed
+  because the install path depends on how the skill is registered (the same
+  shape as the organization's other skills).
 
 ## Alternatives considered
 
@@ -242,7 +255,7 @@ given: 「出典：気象庁ホームページ（URL）を加工して作成」.
 - **Name unknown numbers from their leading digit.** The first draft. The
   leading digit names only the main weather and would answer weather with
   precipitation as 晴; rejected.
-- **Pin one weekly row per subdivision.** Guesswork for the six undecidable
+- **Pin one weekly row per subdivision.** Guesswork for the four undecidable
   subdivisions; the official page does not do it either.
 - **Answer from whatever fetched successfully.** The model would read a
   missing section as "no such information"; rejected.
