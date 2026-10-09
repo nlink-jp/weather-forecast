@@ -225,9 +225,15 @@ given: 「出典：気象庁ホームページ（URL）を加工して作成」.
 - Tests ship recorded responses as fixtures and run offline under
   `make check` through the production fetch path (the base URL swapped for a
   `file://` one).
-- The fixtures start from a single 17:00 release. 05:00 and 11:00 releases
-  and rainy or snowy days are added as they become available; until then the
-  temperature rule is pinned by the documented slots and unit tests.
+- The fixtures hold every region of the 17:00 release of 10/8 and the
+  05:00 release of 10/9. In the 05:00 release all 56 files carry four
+  temperature slots (today 09:00, today 00:00, tomorrow 00:00, tomorrow
+  09:00), and on all 171 points today's 00:00 value equals today's 09:00
+  value (as documented, 今日 is a maximum). The detailed forecast covers
+  today and tomorrow only, the weekly forecast is still the previous day's
+  17:00 release, and one region carried an unscheduled 08:00 release. The
+  11:00 release and rainy or snowy days are added as they become
+  available.
 - If JMA changes the structure or the tables, the offline tests keep
   passing. Changes are noticed by `make check-upstream` (shared files,
   layout, freshness, telop names and temperature points for every region)

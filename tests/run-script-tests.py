@@ -24,6 +24,7 @@ SCRIPTS = REPO / "weather-forecast" / "scripts"
 SCRIPT = SCRIPTS / "jma_forecast.py"
 FIXTURES = REPO / "tests" / "fixtures"
 R17 = FIXTURES / "2026-10-08T17" / "bosai"
+R05 = FIXTURES / "2026-10-09T05" / "bosai"
 
 sys.path.insert(0, str(SCRIPTS))
 import jma_forecast as jf  # noqa: E402
@@ -174,6 +175,38 @@ class AllRegionsTests(unittest.TestCase):
                 for day in row["days"]:
                     with self.subTest(office=office, row=row["area"]["code"], date=day["date"]):
                         self.assertIsNotNone(day["weather"])
+
+
+class Release05Tests(unittest.TestCase):
+    """The 05:00 release of 10/9: four temperature slots, a two-day detailed
+    forecast, and a weekly forecast still from 17:00 the day before."""
+
+    NOW = at("2026-10-09T09:55")
+
+    def test_every_office_and_subdivision(self) -> None:
+        for office in OFFICES:
+            for area in AREA["offices"][office]["children"]:
+                with self.subTest(office=office, area=area):
+                    out = jf.forecast(fetcher(R05), office, area, self.NOW)
+                    self.assertIsNotNone(out["detailed"][0]["temp_point"])
+                    self.assertGreaterEqual(len(out["weekly"]["rows"]), 1)
+
+    def test_today_has_no_morning_low(self) -> None:
+        # Raw temps for 東京: today 09:00 = 26, today 00:00 = 26 (the 24-hour
+        # maximum, identical on all 171 points), tomorrow 00:00 = 16, 09:00 = 25.
+        out = jf.forecast(fetcher(R05), "130000", "130010", self.NOW)
+        days = {d["date"]: d for d in out["detailed"][0]["days"]}
+        self.assertEqual((days["2026-10-09"]["temp_min"], days["2026-10-09"]["temp_max"]), (None, 26))
+        self.assertEqual((days["2026-10-10"]["temp_min"], days["2026-10-10"]["temp_max"]), (16, 25))
+
+    def test_two_day_detailed_forecast(self) -> None:
+        out = jf.forecast(fetcher(R05), "130000", "130010", self.NOW)
+        self.assertEqual([d["label"] for d in out["detailed"][0]["days"]], ["今日", "明日"])
+
+    def test_old_weekly_release_does_not_make_it_stale(self) -> None:
+        out = jf.forecast(fetcher(R05), "130000", None, self.NOW)
+        self.assertEqual(out["weekly"]["report_datetime"], "2026-10-08T17:00:00+09:00")
+        self.assertFalse(out["stale"])
 
 
 class SharedFileTests(unittest.TestCase):

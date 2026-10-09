@@ -38,7 +38,7 @@ weather-forecast/
 ├── tests/
 │   ├── validate-skill.sh        Vendored byte-identical from .github/templates (ADR-006)
 │   ├── run-script-tests.py      unittest suite, offline
-│   └── fixtures/<release>/bosai/  Recorded JMA responses, same paths as the live URLs
+│   └── fixtures/<release>/bosai/  Recorded JMA responses (10/8 17:00, 10/9 05:00), same paths as the live URLs
 ├── docs/{en,ja}/adr/            ADR-0001
 ├── Makefile
 ├── README.md / README.ja.md
